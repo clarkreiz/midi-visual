@@ -3,7 +3,7 @@ BIN := miviz
 .PHONY: build run clean docker
 
 build:
-	go build -o $(BIN) .
+	cd backend && go build -o ../$(BIN) .
 
 FILE ?= CIRCLONT14.mid
 PORT ?=

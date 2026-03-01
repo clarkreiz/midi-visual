@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MIDI Visualizer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1a1a1a; color: #ccc; font-family: monospace;
+       display: flex; flex-direction: column; height: 100vh; }
+
+header { padding: 10px 16px; font-size: 13px; display: flex; gap: 12px;
+         align-items: center; border-bottom: 1px solid #2a2a2a; flex-wrap: wrap; }
+
+#dot { color: #444; transition: color 0.3s; flex-shrink: 0; }
+#dot.on { color: #4c4; }
+
+#file-input { display: none; }
+#pick-btn {
+  cursor: pointer; padding: 3px 10px;
+  border: 1px solid #444; border-radius: 3px;
+  background: #2a2a2a; color: #aaa;
+  white-space: nowrap;
+}
+#pick-btn:hover { border-color: #666; color: #ccc; }
+
+#play-btn {
+  padding: 3px 12px;
+  border: 1px solid #4c4; border-radius: 3px;
+  background: transparent; color: #4c4;
+  cursor: pointer; font-family: monospace; font-size: 13px;
+}
+#play-btn:disabled { border-color: #333; color: #444; cursor: default; }
+#play-btn:not(:disabled):hover { background: #1a3a1a; }
+
+#info { color: #666; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#wrap { flex: 1; overflow-x: auto; overflow-y: hidden;
+        display: flex; align-items: flex-end; padding: 32px 24px; }
+
+#piano { position: relative; flex-shrink: 0; height: 120px; }
+
+.wk {
+  position: absolute; bottom: 0;
+  width: 22px; height: 120px;
+  background: #ddd; border: 1px solid #aaa;
+  border-radius: 0 0 3px 3px;
+  transition: background 60ms;
+}
+.bk {
+  position: absolute; bottom: 48px;
+  width: 14px; height: 72px;
+  background: #1a1a1a; border: 1px solid #444;
+  border-radius: 0 0 2px 2px;
+  z-index: 2;
+  transition: background 60ms;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <span id="dot">●</span>
+  <label id="pick-btn" for="file-input">choose .mid</label>
+  <input type="file" id="file-input" accept=".mid,.midi">
+  <button id="play-btn" disabled>&#9654; play</button>
+  <span id="info">–</span>
+</header>
+
+<div id="wrap"><div id="piano"></div></div>
+
+<script>
+const serverBase = new URLSearchParams(location.search).get('server') || 'http://localhost:8080';
+
+const WHITE = new Set([0,2,4,5,7,9,11]);
+const W = 24;
+
+const piano     = document.getElementById('piano');
+const dot       = document.getElementById('dot');
+const info      = document.getElementById('info');
+const fileInput = document.getElementById('file-input');
+const pickBtn   = document.getElementById('pick-btn');
+const playBtn   = document.getElementById('play-btn');
+const elems     = {};
+const whiteX    = {};
+
+let wx = 0;
+for (let n = 21; n <= 108; n++) {
+  if (WHITE.has(n % 12)) { whiteX[n] = wx; wx += W; }
+}
+for (let n = 21; n <= 108; n++) {
+  const isWhite = WHITE.has(n % 12);
+  const el = document.createElement('div');
+  el.className = isWhite ? 'wk' : 'bk';
+  el.style.left = (isWhite ? whiteX[n] : whiteX[n - 1] + W - 8) + 'px';
+  piano.appendChild(el);
+  elems[n] = { el, isWhite };
+}
+piano.style.width = wx + 'px';
+
+requestAnimationFrame(() => {
+  document.getElementById('wrap').scrollLeft = whiteX[60] - window.innerWidth / 2;
+});
+
+const hue = ch => (ch * 37) % 360;
+
+function noteOn(key, velocity, channel) {
+  const e = elems[key];
+  if (!e) return;
+  e.el.style.background = `hsl(${hue(channel)},85%,${e.isWhite ? '68%' : '42%'})`;
+}
+function noteOff(key) {
+  const e = elems[key];
+  if (e) e.el.style.background = '';
+}
+function allNotesOff() {
+  Object.values(elems).forEach(e => e.el.style.background = '');
+}
+
+let es = null;
+
+function connect(id) {
+  if (es) { es.close(); es = null; }
+  allNotesOff();
+  dot.className = '';
+  info.textContent = 'connecting…';
+
+  es = new EventSource(serverBase + '/events?id=' + id);
+  es.onopen  = () => { dot.className = 'on'; info.textContent = 'playing'; };
+  es.onerror = () => { dot.className = ''; info.textContent = 'finished'; allNotesOff(); };
+  es.onmessage = ({ data }) => {
+    const ev = JSON.parse(data);
+    if (ev.type === 'note_on' && ev.velocity > 0) {
+      noteOn(ev.key, ev.velocity, ev.channel);
+      info.textContent = `${ev.note}  vel=${ev.velocity}  ch=${ev.channel + 1}`;
+    } else if (ev.type === 'note_off' || (ev.type === 'note_on' && ev.velocity === 0)) {
+      noteOff(ev.key);
+    }
+  };
+}
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  pickBtn.textContent = f.name;
+  playBtn.disabled = false;
+});
+
+playBtn.addEventListener('click', async () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+
+  playBtn.disabled = true;
+  info.textContent = 'uploading…';
+
+  try {
+    const form = new FormData();
+    form.append('file', f);
+    const res = await fetch(serverBase + '/session', { method: 'POST', body: form });
+    if (!res.ok) throw new Error(await res.text());
+    const { id } = await res.json();
+    connect(id);
+  } catch (err) {
+    info.textContent = 'error: ' + err.message;
+    playBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
